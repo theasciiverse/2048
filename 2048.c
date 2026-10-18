@@ -621,8 +621,19 @@ int main(int argc, char *argv[])
 			drawBoard(board, scheme, score);
 			if (gameEnded(board))
 			{
-				printf("         GAME OVER          \n");
-				break;
+				// wait, so the final board stays in view when the game
+				// was started from a launcher that takes the screen back
+				const char *over = " GAME OVER  r: again q: quit";
+				printf("%s", over);
+				do
+					c = readKey(board, scheme, score, over);
+				while (c != 'r' && c != 'q' && c != EOF);
+				if (c != 'r')
+					break;
+				initBoard(board);
+				score = 0;
+				drawBoard(board, scheme, score);
+				continue;
 			}
 		}
 		if (c == 'q')
