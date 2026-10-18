@@ -17,3 +17,8 @@
 
 # github-export
 github-data/
+# Asciiverse packaging
+out/
+stage/
+dist/
+__pycache__/
