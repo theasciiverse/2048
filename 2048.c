@@ -13,14 +13,22 @@
 #include <stdio.h>		  // defines: printf, puts, getchar
 #include <stdlib.h>		  // defines: EXIT_SUCCESS
 #include <string.h>		  // defines: strcmp
+#ifdef _WIN32
+#include <windows.h>	  // defines: console functions, Sleep
+#include <conio.h>		  // defines: _kbhit, _getch
+#define usleep(us) Sleep((us) / 1000)
+#else
 #include <unistd.h>		  // defines: STDIN_FILENO, usleep
 #include <termios.h>	  // defines: termios, TCSANOW, ICANON, ECHO
+#endif
 #include <stdbool.h>	  // defines: true, false
 #include <stdint.h>		  // defines: uint8_t, uint32_t
 #include <time.h>		  // defines: time
 #include <signal.h>		  // defines: signal, SIGINT
 #include <errno.h>		  // defines: errno, EINTR
+#ifndef _WIN32
 #include <sys/ioctl.h>	  // defines: ioctl, TIOCGWINSZ
+#endif
 
 #define SIZE 4
 
@@ -35,16 +43,36 @@
 static int originRow = 1, originCol = 1;
 static volatile sig_atomic_t resized = 0;
 
+// the terminal's size, or 0 when it is not known
+int terminalSize(int *rows, int *cols)
+{
+#ifdef _WIN32
+	CONSOLE_SCREEN_BUFFER_INFO info;
+	if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info))
+		return 0;
+	*rows = info.srWindow.Bottom - info.srWindow.Top + 1;
+	*cols = info.srWindow.Right - info.srWindow.Left + 1;
+	return 1;
+#else
+	struct winsize ws;
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_row == 0 || ws.ws_col == 0)
+		return 0;
+	*rows = ws.ws_row;
+	*cols = ws.ws_col;
+	return 1;
+#endif
+}
+
 void placeBoard()
 {
-	struct winsize ws;
+	int rows, cols;
 	originRow = originCol = 1;
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0)
+	if (terminalSize(&rows, &cols))
 	{
-		if (ws.ws_row > BOARD_HEIGHT)
-			originRow = (ws.ws_row - BOARD_HEIGHT) / 2 + 1;
-		if (ws.ws_col > BOARD_WIDTH)
-			originCol = (ws.ws_col - BOARD_WIDTH) / 2 + 1;
+		if (rows > BOARD_HEIGHT)
+			originRow = (rows - BOARD_HEIGHT) / 2 + 1;
+		if (cols > BOARD_WIDTH)
+			originCol = (cols - BOARD_WIDTH) / 2 + 1;
 	}
 }
 
@@ -54,11 +82,13 @@ void moveToLine(uint8_t line)
 	printf("\033[%d;%dH", originRow + line, originCol);
 }
 
+#ifndef _WIN32
 void resizeHandler(int signum)
 {
 	(void)signum;
 	resized = 1;
 }
+#endif
 
 // this function receives 2 pointers (indicated by *) so it can set their values
 void getColors(uint8_t value, uint8_t scheme, uint8_t *foreground, uint8_t *background)
@@ -140,11 +170,26 @@ void drawBoard(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score)
 // with the prompt it was showing, if any
 int readKey(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score, const char *prompt)
 {
+#ifdef _WIN32
+	int rows = 0, cols = 0, r, k;
+	terminalSize(&rows, &cols);
+#else
 	unsigned char c;
 	ssize_t n;
+#endif
 	fflush(stdout);
 	while (true)
 	{
+#ifdef _WIN32
+		// no SIGWINCH: notice a new console size while polling for keys
+		int newRows, newCols;
+		if (terminalSize(&newRows, &newCols) && (newRows != rows || newCols != cols))
+		{
+			rows = newRows;
+			cols = newCols;
+			resized = 1;
+		}
+#endif
 		if (resized)
 		{
 			resized = 0;
@@ -155,12 +200,27 @@ int readKey(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score, const cha
 				printf("%s", prompt);
 			fflush(stdout);
 		}
+#ifdef _WIN32
+		if (!_kbhit())
+		{
+			Sleep(30);
+			continue;
+		}
+		k = _getch();
+		if (k != 0 && k != 224)
+			return k;
+		// the cursor keys come as a prefix and a scan code; give them the
+		// last letters of their ANSI sequences, as on other systems
+		r = _getch();
+		return r == 72 ? 'A' : r == 80 ? 'B' : r == 77 ? 'C' : r == 75 ? 'D' : 0;
+#else
 		n = read(STDIN_FILENO, &c, 1);
 		if (n == 1)
 			return c;
 		if (n < 0 && errno == EINTR)
 			continue;
 		return EOF;
+#endif
 	}
 }
 
@@ -392,6 +452,30 @@ void initBoard(uint8_t board[SIZE][SIZE])
 
 void setBufferedInput(bool enable)
 {
+#ifdef _WIN32
+	// keys are read with _getch(), unbuffered and unechoed already; the
+	// console is switched to UTF-8 and to ANSI escape sequences for the
+	// drawing, and back afterwards
+	static DWORD oldMode;
+	static UINT oldCodePage;
+	static bool switched = false;
+	HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (!enable && !switched)
+	{
+		oldCodePage = GetConsoleOutputCP();
+		SetConsoleOutputCP(CP_UTF8);
+		if (GetConsoleMode(out, &oldMode))
+			SetConsoleMode(out, oldMode | ENABLE_PROCESSED_OUTPUT | 0x0004 /* ENABLE_VIRTUAL_TERMINAL_PROCESSING */);
+		switched = true;
+	}
+	else if (enable && switched)
+	{
+		fflush(stdout);
+		SetConsoleMode(out, oldMode);
+		SetConsoleOutputCP(oldCodePage);
+		switched = false;
+	}
+#else
 	static bool enabled = true;
 	static struct termios old;
 	struct termios new;
@@ -416,6 +500,7 @@ void setBufferedInput(bool enable)
 		// set the new state
 		enabled = false;
 	}
+#endif
 }
 
 bool testSucceed()
@@ -558,12 +643,17 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	// unbuffered keys (and, on Windows, a console that understands the
+	// escape sequences below)
+	setBufferedInput(false);
+
 	// make cursor invisible, erase entire screen
 	printf("\033[?25l\033[2J");
 
 	// register signal handler for when ctrl-c is pressed
 	signal(SIGINT, signal_callback_handler);
 
+#ifndef _WIN32
 	// a resized terminal interrupts the wait for a key, so the board can
 	// be centred again
 	struct sigaction sa;
@@ -571,9 +661,9 @@ int main(int argc, char *argv[])
 	sa.sa_handler = resizeHandler;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGWINCH, &sa, NULL);
+#endif
 
 	initBoard(board);
-	setBufferedInput(false);
 	placeBoard();
 	drawBoard(board, scheme, score);
 	while (true)
