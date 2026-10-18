@@ -9,6 +9,7 @@
 #define VERSION "1.0.5"
 
 #define _XOPEN_SOURCE 500 // for: usleep
+#define _DARWIN_C_SOURCE  // for: SIGWINCH, TIOCGWINSZ on macOS
 #include <stdio.h>		  // defines: printf, puts, getchar
 #include <stdlib.h>		  // defines: EXIT_SUCCESS
 #include <string.h>		  // defines: strcmp
@@ -18,8 +19,46 @@
 #include <stdint.h>		  // defines: uint8_t, uint32_t
 #include <time.h>		  // defines: time
 #include <signal.h>		  // defines: signal, SIGINT
+#include <errno.h>		  // defines: errno, EINTR
+#include <sys/ioctl.h>	  // defines: ioctl, TIOCGWINSZ
 
 #define SIZE 4
+
+// the board's size on screen: the score line, a blank line, four rows of
+// tiles three lines high, a blank line and the keys line, plus the line
+// the cursor is left on
+#define BOARD_WIDTH 28
+#define BOARD_HEIGHT 17
+
+// the screen position (1-based) of the board's top left corner, so it
+// sits in the middle of the terminal
+static int originRow = 1, originCol = 1;
+static volatile sig_atomic_t resized = 0;
+
+void placeBoard()
+{
+	struct winsize ws;
+	originRow = originCol = 1;
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 && ws.ws_col > 0)
+	{
+		if (ws.ws_row > BOARD_HEIGHT)
+			originRow = (ws.ws_row - BOARD_HEIGHT) / 2 + 1;
+		if (ws.ws_col > BOARD_WIDTH)
+			originCol = (ws.ws_col - BOARD_WIDTH) / 2 + 1;
+	}
+}
+
+// moves the cursor to the start of the given line of the board
+void moveToLine(uint8_t line)
+{
+	printf("\033[%d;%dH", originRow + line, originCol);
+}
+
+void resizeHandler(int signum)
+{
+	(void)signum;
+	resized = 1;
+}
 
 // this function receives 2 pointers (indicated by *) so it can set their values
 void getColors(uint8_t value, uint8_t scheme, uint8_t *foreground, uint8_t *background)
@@ -48,9 +87,10 @@ uint8_t getDigitCount(uint32_t number)
 
 void drawBoard(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score)
 {
-	uint8_t x, y, fg, bg;
-	printf("\033[H"); // move cursor to 0,0
-	printf("2048.c %17u pts\n\n", score);
+	uint8_t x, y, fg, bg, line = 2;
+	moveToLine(0); // the top left corner of the board
+	printf("2048.c %17u pts", score);
+	moveToLine(line);
 	for (y = 0; y < SIZE; y++)
 	{
 		for (x = 0; x < SIZE; x++)
@@ -62,7 +102,7 @@ void drawBoard(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score)
 			printf("       ");
 			printf("\033[m"); // reset all modes
 		}
-		printf("\n");
+		moveToLine(++line);
 		for (x = 0; x < SIZE; x++)
 		{
 			getColors(board[x][y], scheme, &fg, &bg);
@@ -79,7 +119,7 @@ void drawBoard(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score)
 			}
 			printf("\033[m"); // reset all modes
 		}
-		printf("\n");
+		moveToLine(++line);
 		for (x = 0; x < SIZE; x++)
 		{
 			getColors(board[x][y], scheme, &fg, &bg);
@@ -87,11 +127,41 @@ void drawBoard(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score)
 			printf("       ");
 			printf("\033[m"); // reset all modes
 		}
-		printf("\n");
+		moveToLine(++line);
 	}
-	printf("\n");
-	printf("        ←,↑,→,↓ or q        \n");
-	printf("\033[A"); // one line up
+	moveToLine(++line);
+	printf("        ←,↑,→,↓ or q        ");
+	moveToLine(line); // messages go over the keys line
+	fflush(stdout);
+}
+
+// reads one key without waiting for Enter; when the terminal is resized
+// while it waits, the board is placed in the middle again and redrawn,
+// with the prompt it was showing, if any
+int readKey(uint8_t board[SIZE][SIZE], uint8_t scheme, uint32_t score, const char *prompt)
+{
+	unsigned char c;
+	ssize_t n;
+	fflush(stdout);
+	while (true)
+	{
+		if (resized)
+		{
+			resized = 0;
+			printf("\033[2J");
+			placeBoard();
+			drawBoard(board, scheme, score);
+			if (prompt != NULL)
+				printf("%s", prompt);
+			fflush(stdout);
+		}
+		n = read(STDIN_FILENO, &c, 1);
+		if (n == 1)
+			return c;
+		if (n < 0 && errno == EINTR)
+			continue;
+		return EOF;
+	}
 }
 
 uint8_t findTarget(uint8_t array[SIZE], uint8_t x, uint8_t stop)
@@ -494,12 +564,21 @@ int main(int argc, char *argv[])
 	// register signal handler for when ctrl-c is pressed
 	signal(SIGINT, signal_callback_handler);
 
+	// a resized terminal interrupts the wait for a key, so the board can
+	// be centred again
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = resizeHandler;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGWINCH, &sa, NULL);
+
 	initBoard(board);
 	setBufferedInput(false);
+	placeBoard();
 	drawBoard(board, scheme, score);
 	while (true)
 	{
-		c = getchar();
+		c = readKey(board, scheme, score, NULL);
 		if (c == EOF)
 		{
 			puts("\nError! Cannot read keyboard input!");
@@ -549,7 +628,7 @@ int main(int argc, char *argv[])
 		if (c == 'q')
 		{
 			printf("        QUIT? (y/n)         \n");
-			c = getchar();
+			c = readKey(board, scheme, score, "        QUIT? (y/n)         ");
 			if (c == 'y')
 			{
 				break;
@@ -559,7 +638,7 @@ int main(int argc, char *argv[])
 		if (c == 'r')
 		{
 			printf("       RESTART? (y/n)       \n");
-			c = getchar();
+			c = readKey(board, scheme, score, "       RESTART? (y/n)       ");
 			if (c == 'y')
 			{
 				initBoard(board);
@@ -570,8 +649,9 @@ int main(int argc, char *argv[])
 	}
 	setBufferedInput(true);
 
-	// make cursor visible, reset all modes
-	printf("\033[?25h\033[m");
+	// leave the cursor below the board, make it visible, reset all modes
+	moveToLine(BOARD_HEIGHT - 1);
+	printf("\r\033[?25h\033[m");
 
 	return EXIT_SUCCESS;
 }
