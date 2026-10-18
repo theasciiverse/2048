@@ -6,7 +6,7 @@
  ============================================================================
  */
 
-#define VERSION "1.0.3"
+#define VERSION "1.0.5"
 
 #define _XOPEN_SOURCE 500 // for: usleep
 #include <stdio.h>		  // defines: printf, puts, getchar
