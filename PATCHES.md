@@ -65,3 +65,9 @@ with MinGW-w64 and run under Wine: keys (letters and arrows), the score
 and quitting work, but Wine's console prints the escape sequences and
 UTF-8 literally, so the drawing on a real Windows console is unchecked.
 macOS: not built here.
+
+## Ours
+
+- **How to play it, at the top of README.md.** A short note on installing and
+  starting it with av, or from a release archive; the original text follows
+  unchanged.

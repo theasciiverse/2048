@@ -1,3 +1,16 @@
+> **Play it with Asciiverse.** With [av](https://asciiverse.sh), the Asciiverse
+> client:
+>
+> ```
+> av install 2048
+> av play 2048
+> ```
+>
+> Or download the archive for your system from this repository's Releases,
+> unpack it and run `./2048` (`2048.exe` on Windows).
+>
+> The original README follows.
+
 2048.c
 ======
 
